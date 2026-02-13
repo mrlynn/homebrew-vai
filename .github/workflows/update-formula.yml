@@ -1,0 +1,175 @@
+name: Update Formula
+
+on:
+  schedule:
+    # Check for new versions daily at 9am UTC
+    - cron: '0 9 * * *'
+
+  # Allow the main voyageai-cli repo to trigger this after npm publish
+  # Usage from main repo:
+  #   curl -X POST \
+  #     -H "Authorization: Bearer $GITHUB_TOKEN" \
+  #     -H "Accept: application/vnd.github.v3+json" \
+  #     https://api.github.com/repos/mrlynn/homebrew-vai/dispatches \
+  #     -d '{"event_type":"npm-publish","client_payload":{"version":"1.21.0"}}'
+  repository_dispatch:
+    types: [npm-publish]
+
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Specific version to update to (leave empty for latest)'
+        required: false
+        type: string
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout tap repository
+        uses: actions/checkout@v4
+
+      - name: Determine target version
+        id: version
+        run: |
+          # Priority: workflow input > repository_dispatch payload > latest from npm
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            TARGET="${{ github.event.inputs.version }}"
+            echo "Source: workflow_dispatch input"
+          elif [ -n "${{ github.event.client_payload.version }}" ]; then
+            TARGET="${{ github.event.client_payload.version }}"
+            echo "Source: repository_dispatch payload"
+          else
+            echo "Source: npm registry (latest)"
+            TARGET=""
+          fi
+
+          if [ -z "$TARGET" ]; then
+            # Fetch latest with retry
+            for attempt in 1 2 3; do
+              TARGET=$(curl -sf https://registry.npmjs.org/voyageai-cli/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])" 2>/dev/null) && break
+              echo "Attempt $attempt failed, retrying in 5s..."
+              sleep 5
+            done
+          fi
+
+          if [ -z "$TARGET" ]; then
+            echo "::error::Could not determine target version"
+            exit 1
+          fi
+
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "Target version: $TARGET"
+
+      - name: Check current formula version
+        id: check
+        run: |
+          CURRENT=$(grep -oP 'voyageai-cli-\K[0-9]+\.[0-9]+\.[0-9]+' Formula/vai.rb | head -1)
+          TARGET="${{ steps.version.outputs.target }}"
+
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+
+          if [ "$CURRENT" = "$TARGET" ]; then
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+            echo "Formula is already at $CURRENT — nothing to do."
+          else
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "Update needed: $CURRENT → $TARGET"
+          fi
+
+      - name: Download tarball and compute SHA256
+        if: steps.check.outputs.needs_update == 'true'
+        id: tarball
+        run: |
+          VERSION="${{ steps.version.outputs.target }}"
+          TARBALL_URL="https://registry.npmjs.org/voyageai-cli/-/voyageai-cli-${VERSION}.tgz"
+
+          echo "Downloading $TARBALL_URL..."
+
+          # Download with retry
+          for attempt in 1 2 3; do
+            HTTP_CODE=$(curl -sL -o /tmp/vai.tgz -w "%{http_code}" "$TARBALL_URL") && break
+            echo "Attempt $attempt failed (HTTP $HTTP_CODE), retrying in 10s..."
+            sleep 10
+          done
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Failed to download tarball (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          # Validate tarball size (should be at least a few KB)
+          SIZE=$(stat -c%s /tmp/vai.tgz 2>/dev/null || stat -f%z /tmp/vai.tgz 2>/dev/null)
+          if [ "$SIZE" -lt 1000 ]; then
+            echo "::error::Tarball is too small ($SIZE bytes) — likely a bad download"
+            exit 1
+          fi
+
+          SHA256=$(sha256sum /tmp/vai.tgz | awk '{print $1}')
+
+          echo "url=$TARBALL_URL" >> $GITHUB_OUTPUT
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
+
+          echo "SHA256: $SHA256"
+          echo "Size: $SIZE bytes"
+
+      - name: Update formula
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.target }}"
+          URL="${{ steps.tarball.outputs.url }}"
+          SHA="${{ steps.tarball.outputs.sha256 }}"
+
+          # Pattern-based replacement — no hardcoded versions
+          sed -i "s|url \"https://registry.npmjs.org/voyageai-cli/-/voyageai-cli-.*\.tgz\"|url \"${URL}\"|" Formula/vai.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/vai.rb
+
+          echo "Updated Formula/vai.rb:"
+          grep -E '^\s+(url|sha256)' Formula/vai.rb
+
+      - name: Validate formula syntax
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          # Basic Ruby syntax check
+          ruby -c Formula/vai.rb
+          echo "Ruby syntax OK"
+
+          # Verify the sha256 looks like a valid hex string
+          SHA=$(grep -oP 'sha256 "\K[a-f0-9]+' Formula/vai.rb)
+          if [ ${#SHA} -ne 64 ]; then
+            echo "::error::SHA256 in formula is not 64 hex characters: $SHA"
+            exit 1
+          fi
+          echo "SHA256 format OK"
+
+      - name: Create Pull Request
+        if: steps.check.outputs.needs_update == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "vai ${{ steps.version.outputs.target }}"
+          title: "Update vai to ${{ steps.version.outputs.target }}"
+          body: |
+            Automated formula update.
+
+            | | |
+            |---|---|
+            | **Previous** | `${{ steps.check.outputs.current }}` |
+            | **New** | `${{ steps.version.outputs.target }}` |
+            | **SHA256** | `${{ steps.tarball.outputs.sha256 }}` |
+            | **Size** | ${{ steps.tarball.outputs.size }} bytes |
+
+            **Links:**
+            - [npm](https://www.npmjs.com/package/voyageai-cli/v/${{ steps.version.outputs.target }})
+            - [GitHub Release](https://github.com/mrlynn/voyageai-cli/releases/tag/v${{ steps.version.outputs.target }})
+
+            ---
+            _Triggered by: ${{ github.event_name }}_
+          branch: formula/vai-${{ steps.version.outputs.target }}
+          delete-branch: true
+          labels: formula-update
