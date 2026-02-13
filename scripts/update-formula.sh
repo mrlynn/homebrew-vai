@@ -80,10 +80,10 @@ npm_field() {
     echo "$json" | jq -r "$field" 2>/dev/null && return
   fi
 
-  # Fallback: grep (fragile but works for simple fields)
+  # Fallback: grep/sed (fragile but works for simple fields)
   local key
-  key=$(echo "$field" | grep -oP "'\K[^']+")
-  echo "$json" | grep -oP "\"${key}\"\s*:\s*\"\K[^\"]+" | head -1
+  key=$(echo "$field" | sed "s/.*'\([^']*\)'.*/\1/")
+  echo "$json" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
 }
 
 # ─── Step 1: Resolve version from npm ────────────────────────────────────────
@@ -160,7 +160,7 @@ fi
 
 log "Checking current formula version..."
 
-CURRENT_VERSION=$(grep -oP "${NPM_PACKAGE}-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tgz)" "$FORMULA_PATH" | head -1)
+CURRENT_VERSION=$(sed -n "s/.*${NPM_PACKAGE}-\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\.tgz.*/\1/p" "$FORMULA_PATH" | head -1)
 info "Current formula version: ${CURRENT_VERSION:-unknown}"
 info "Target version:          $VERSION"
 
@@ -182,8 +182,8 @@ if [ "$DRY_RUN" = true ]; then
   # Create a temp copy to show the diff
   TMPFORMULA=$(mktemp)
   cp "$FORMULA_PATH" "$TMPFORMULA"
-  sed -i "s|url \"https://registry.npmjs.org/${NPM_PACKAGE}/-/${NPM_PACKAGE}-.*\.tgz\"|url \"${TARBALL_URL}\"|" "$TMPFORMULA"
-  sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$TMPFORMULA"
+  sed -i '' "s|url \"https://registry.npmjs.org/${NPM_PACKAGE}/-/${NPM_PACKAGE}-.*\.tgz\"|url \"${TARBALL_URL}\"|" "$TMPFORMULA"
+  sed -i '' "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$TMPFORMULA"
   diff --color=auto "$FORMULA_PATH" "$TMPFORMULA" || true
   rm -f "$TMPFORMULA"
   exit 0
@@ -193,8 +193,8 @@ log "Updating formula..."
 
 # Use sed to replace the url and sha256 lines
 # This approach is resilient — it matches the pattern, not a specific version
-sed -i "s|url \"https://registry.npmjs.org/${NPM_PACKAGE}/-/${NPM_PACKAGE}-.*\.tgz\"|url \"${TARBALL_URL}\"|" "$FORMULA_PATH"
-sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$FORMULA_PATH"
+sed -i '' "s|url \"https://registry.npmjs.org/${NPM_PACKAGE}/-/${NPM_PACKAGE}-.*\.tgz\"|url \"${TARBALL_URL}\"|" "$FORMULA_PATH"
+sed -i '' "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$FORMULA_PATH"
 
 info "Formula updated."
 
