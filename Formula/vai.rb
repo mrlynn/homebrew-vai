@@ -6,8 +6,8 @@ class Vai < Formula
   # Update the URL and sha256 with each new release.
   # To get the tarball URL: https://registry.npmjs.org/voyageai-cli/-/voyageai-cli-<VERSION>.tgz
   # To compute sha256: curl -sL <URL> | shasum -a 256
-  url "https://registry.npmjs.org/voyageai-cli/-/voyageai-cli-1.29.0.tgz"
-  sha256 "ca15922f279a5b6e9f5ed5d49b3ad6072a8c90bcf00f1a4323df347fb995d0ab"
+  url "https://registry.npmjs.org/voyageai-cli/-/voyageai-cli-1.30.9.tgz"
+  sha256 "b0dfc2637b7e67bf4dde87bcc069ac02cc0c3b62e640bc5423900cc013003c6b"
   license "MIT"
 
   livecheck do
